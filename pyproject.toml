@@ -1,0 +1,54 @@
+[project]
+name = "edgebettor-ml"
+version = "0.1.0"
+description = "NFL game outcome model with EV for moneyline, spread, and totals"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "EdgeBettor" }]
+dependencies = [
+    "nfl-data-py>=0.3.1",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pydantic>=2.7",
+    "scikit-learn>=1.4",
+    "torch>=2.3",
+    "xgboost>=2.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.4.9",
+    "black>=24.8.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = [
+  "E","F","I","W","B","UP","S","C90","C4","N","A","T20"
+]
+ignore = [
+  "S101"  # assert allowed in tests
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["edgebettor_ml"]
+
+

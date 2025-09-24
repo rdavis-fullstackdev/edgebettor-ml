@@ -1,0 +1,37 @@
+seed: 42
+artifacts_dir: artifacts
+model:
+  type: pytorch
+  hidden_sizes: [128, 64]
+  dropout: 0.2
+  lr: 0.001
+  batch_size: 256
+  max_epochs: 100
+  early_stopping_patience: 15
+features:
+  windows: [3, 5]
+  include:
+    - epa_off
+    - epa_def
+    - success_off
+    - success_def
+    - pass_rate
+    - neutral_pace
+    - redzone_off
+    - redzone_def
+    - third_down_off
+    - third_down_def
+    - turnovers_off
+    - turnovers_def
+    - sos
+    - rest_days
+    - home_field
+    - dome
+    - travel_miles
+  market_inputs: true
+class_weights:
+  home_win: 1.0
+  home_cover: 1.0
+  over_total: 1.0
+
+

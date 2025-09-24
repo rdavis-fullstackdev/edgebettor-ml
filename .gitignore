@@ -1,3 +1,29 @@
+# Python
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Data & Artifacts
+.data/
+artifacts/
+outputs/
+reports/
+
+# OS / Editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Locks
+uv.lock
+requirements.lock
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -1,0 +1,297 @@
+Here is a single, copy-paste prompt for your model repo. Paste this into Cursor or your code agent.
+
+Title
+NFL game outcome model with EV for moneyline, spread, and totals
+
+Goal
+Build a Python project that predicts NFL games using nfl\_data\_py. Output:
+
+1. Home and away win probabilities.
+2. Cover probabilities vs market spread for both sides.
+3. Over and under probabilities vs market total.
+4. Expected value for moneyline, spread, and total given market odds.
+
+Scope
+Model-only project. Do not own storage. Expose batch CLI and a lightweight local service for predictions. Post results to an external API if API\_URL is set. Otherwise write CSV and JSON locally.
+
+Stack
+Python 3.11
+nfl\_data\_py
+pandas, numpy, scipy
+pydantic
+scikit-learn
+tensorflow or pytorch
+xgboost for baselines
+pyyaml
+uv or pip-tools for locking
+pytest
+ruff + black
+
+Repository layout
+README.md
+pyproject.toml
+requirements.lock
+src/
+nfl\_ev/
+**init**.py
+config.py
+data/
+acquire.py
+features.py
+splits.py
+modeling/
+datasets.py
+model\_nn.py
+model\_xgb.py
+train.py
+evaluate.py
+infer.py
+calibration.py
+odds/
+adapter\_base.py
+adapter\_theoddsapi.py
+adapter\_csv.py
+pricing.py
+service/
+app.py
+io/
+sinks.py
+schemas.py
+scripts/
+backfill\_train\_data.py
+train\_nn.py
+predict\_week.py
+evaluate\_week.py
+export\_artifacts.py
+tests/
+test\_features.py
+test\_pricing.py
+test\_infer\_shapes.py
+Makefile
+.env.example
+configs/
+train.yaml
+infer.yaml
+
+Data acquisition
+Use nfl\_data\_py to pull:
+• schedules, game outcomes, spreads, totals, closing moneylines
+• team logos and ids for joins
+• weekly team stats and rolling efficiency from pbp (EPA, success rate, pass rate, neutral pace)
+• injuries not required for v1
+
+Create scripts/data/acquire.py that:
+• pulls seasons 2009 through last completed season
+• for the current season, pulls through last completed week
+• caches raw CSVs under .data/raw
+• normalizes keys: season, week, game\_id, home\_team, away\_team, outcome fields, closing lines and odds if available
+
+Feature engineering
+In src/nfl\_ev/data/features.py build per-game rows with both teams:
+• rolling windows per team: last 3 and last 5 games for EPA/play offense, EPA/play defense, success rate, pass rate, run rate, neutral pace, red zone trip rate, third down rate, pressure rate if available
+• rest days, home field flag, dome flag, travel miles using team city coords (include a simple mapping file for coords)
+• matchup diffs: home\_offense\_rolling\_minus\_away\_defense\_rolling and vice versa
+• market inputs: closing spread, closing total, closing moneyline for both teams where available
+• target columns:
+– y\_home\_win (1 if home won)
+– y\_home\_cover\_vs\_closing (1 if home covered closing spread)
+– y\_over\_total\_vs\_closing (1 if total points > closing total)
+Split logic in src/nfl\_ev/data/splits.py:
+• time-based split: train on seasons <= S-2, validate on S-1, test on S
+• also support expanding-window CV
+
+Datasets
+src/nfl\_ev/modeling/datasets.py:
+• build Tensor/ndarray datasets
+• handle NA with median impute per feature
+• standardize continuous features with stats from train only
+• store feature\_names.json and scalers.pkl in artifacts
+
+Model
+Neural network in src/nfl\_ev/modeling/model\_nn.py:
+• shared trunk with batchnorm
+• dropout 0.2
+• three heads with sigmoid outputs:
+– head\_home\_win\_prob
+– head\_home\_cover\_prob
+– head\_over\_prob
+• loss: binary cross entropy per head with weights to balance classes
+• metrics: AUC, Brier score, log loss per head
+• callback: early stopping on val\_brier\_mean with patience 15
+• save best weights
+
+Baseline
+Gradient boosted trees in model\_xgb.py with same targets for sanity checks.
+
+Calibration
+src/nfl\_ev/modeling/calibration.py:
+• isotonic or Platt scaling on validation set per head
+• store calibrators and apply at inference
+
+Training
+scripts/train\_nn.py:
+• read configs/train.yaml
+• run data build, train split, model fit, calibrate, evaluate
+• write artifacts under artifacts/{run\_id}/:
+– model.pt or model.keras
+– feature\_names.json
+– scalers.pkl
+– calibrators.pkl
+– metrics.json
+– shap\_summary.png optional
+• log metrics to console and metrics.json
+
+Inference
+src/nfl\_ev/modeling/infer.py:
+• load latest artifacts
+• input: upcoming games dataframe with engineered features
+• output probabilities:
+– p\_home\_win
+– p\_away\_win = 1 - p\_home\_win
+– p\_home\_cover
+– p\_away\_cover = 1 - p\_home\_cover if spread two-way market
+– p\_over
+– p\_under = 1 - p\_over
+
+Odds adapters
+src/nfl\_ev/odds/adapter\_base.py:
+• interface fetch\_odds(season, week) -> standardized dataframe with:
+game\_id, home\_team, away\_team,
+moneyline\_home, moneyline\_away,
+spread\_home (home spread, negative if favored),
+spread\_price\_home, spread\_price\_away,
+total\_points, total\_over\_price, total\_under\_price
+Provide two implementations:
+• adapter\_csv.py reads a local CSV with those columns
+• adapter\_theoddsapi.py integrates The Odds API using API key env var. Include retry and rate limit handling.
+
+Pricing formulas
+src/nfl\_ev/odds/pricing.py:
+• american odds to implied probability:
+if odds > 0: implied = 100 / (odds + 100)
+if odds < 0: implied = -odds / (-odds + 100)
+• per \$1 stake expected value:
+if odds > 0: payoff = odds / 100
+if odds < 0: payoff = 100 / -odds
+EV = p \* payoff - (1 - p) \* 1
+• edge = p - implied
+• for spreads and totals use side-specific prices spread\_price\_home, spread\_price\_away, total\_over\_price, total\_under\_price
+
+EV computation
+For each market:
+• Moneyline
+– p\_home\_win vs moneyline\_home
+– p\_away\_win vs moneyline\_away
+• Spread
+– p\_home\_cover vs spread\_price\_home
+– p\_away\_cover vs spread\_price\_away
+• Total
+– p\_over vs total\_over\_price
+– p\_under vs total\_under\_price
+Compute EV and edge for each option. Rank by EV, then by edge, then by AUC head reliability from metrics.json.
+
+Batch prediction script
+scripts/predict\_week.py:
+• inputs: season, week, odds\_source=csv|theoddsapi, path to odds CSV if csv
+• steps:
+– pull schedule and team stats up to week-1
+– build features for week games
+– run inference
+– join market odds
+– price EV for all markets
+– write outputs:
+outputs/preds\_{season}*wk{week}.csv
+outputs/preds*{season}\_wk{week}.json
+– if API\_URL present, POST JSON to API\_URL with API\_TOKEN header
+
+Evaluation script
+scripts/evaluate\_week.py:
+• after games finish, compute brier, log loss, calibration curve, ROI by taking top N EV bets per market
+• write reports under reports/season\_week/
+
+Service
+src/nfl\_ev/service/app.py:
+• FastAPI with two endpoints
+– GET /health
+– POST /predict with body:
+{ season, week, odds\_source, odds\_csv\_path? }
+• returns the same JSON as batch script
+• include OpenAPI docs
+
+Config
+configs/train.yaml:
+• model hyperparams
+• feature list
+• windows
+• class weights
+configs/infer.yaml:
+• artifact path
+• odds source default
+
+I/O schemas
+src/nfl\_ev/io/sinks.py and schemas.py:
+• Pydantic models for PredictionRow and EvRow
+• CSV and JSON writers
+• API poster
+
+Makefile targets
+make setup
+make lock
+make data
+make train
+make predict SEASON=2025 WEEK=4 ODDS=csv PATH=inputs/odds\_wk4.csv
+make service
+make test
+make lint
+
+Environment
+.env.example
+PYTHONPATH=src
+API\_URL=
+API\_TOKEN=
+ODDS\_API\_KEY=
+TZ=America/Chicago
+
+Quality gates
+• ruff and black pass on CI
+• pytest passes with tests:
+– features shape and NA handling
+– odds pricing math on known cases
+– inference output ranges 0..1
+– EV sign tests on synthetic inputs
+• holdout test season AUC ≥ 0.60 on win head baseline
+• brier score improvement vs naive baseline
+• calibration curve within 5 percentage points in buckets of 10
+
+README content
+• quickstart
+• data download steps
+• how to train
+• how to run weekly predictions
+• how to wire an odds source
+• EV math with examples
+• known limitations
+
+Assumptions and constraints
+• Setup the project following python machine learning project best practices
+• Use a linter
+• Implement unit tests to validate your work and any future work that could affect existing code
+• Use closing lines for training targets
+• Use most recent market lines for inference
+• No player-level features in v1
+• Handle postponed or neutral-site games
+• Deterministic seeds and versioned artifacts
+
+Deliverables
+• Working repo per layout
+• Locked dependencies
+• Reproducible training run with artifacts
+• One example weekly prediction file
+• Postman collection or curl examples for service
+
+Hand-off to storage API project
+• scripts/export\_artifacts.py exports Prediction and EV JSON per game
+• POST body schema documented in README
+• Include idempotency key per game\_id to support upsert on the external API
+
+Now build the repo to this spec.
