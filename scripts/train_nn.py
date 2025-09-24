@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import time
 from typing import Dict, List
 
 import numpy as np
@@ -34,11 +35,39 @@ def load_configs(path: str | Path) -> dict:
         return yaml.safe_load(f)
 
 
+def _build_weekly_from_schedule(schedules: pd.DataFrame) -> pd.DataFrame:
+    cols = ["season", "week", "home_team", "away_team", "home_score", "away_score"]
+    for c in cols:
+        if c not in schedules.columns:
+            schedules[c] = np.nan
+    played = schedules.dropna(subset=["home_score", "away_score"])  # completed games
+    home_rows = played[["season", "week", "home_team", "home_score", "away_score"]].copy()
+    home_rows.rename(columns={
+        "home_team": "team",
+        "home_score": "points_for",
+        "away_score": "points_against",
+    }, inplace=True)
+    away_rows = played[["season", "week", "away_team", "away_score", "home_score"]].copy()
+    away_rows.rename(columns={
+        "away_team": "team",
+        "away_score": "points_for",
+        "home_score": "points_against",
+    }, inplace=True)
+    weekly = pd.concat([home_rows, away_rows], axis=0, ignore_index=True)
+    weekly["margin"] = weekly["points_for"] - weekly["points_against"]
+    return weekly
+
+
 def assemble_training_frame(raw_dir: Path) -> pd.DataFrame:
     # Load raw components
     schedules = pd.read_csv(raw_dir / "schedules.csv")
-    betting = pd.read_csv(raw_dir / "betting_lines.csv")
-    weekly = pd.read_csv(raw_dir / "team_weekly.csv")
+    betting_path = raw_dir / "betting_lines.csv"
+    betting = pd.read_csv(betting_path) if betting_path.exists() else pd.DataFrame()
+    weekly_path = raw_dir / "team_weekly.csv"
+    if weekly_path.exists():
+        weekly = pd.read_csv(weekly_path)
+    else:
+        weekly = _build_weekly_from_schedule(schedules)
 
     # Normalize schedules minimal columns
     keep = [
@@ -65,20 +94,27 @@ def assemble_training_frame(raw_dir: Path) -> pd.DataFrame:
         "home_moneyline_close",
         "away_moneyline_close",
     ]
-    for c in bl_keep:
-        if c not in betting.columns:
-            betting[c] = np.nan
-    bl = betting[bl_keep].drop_duplicates("game_id")
-    df = sched.merge(bl, on="game_id", how="left")
-    df.rename(
-        columns={
-            "spread_close": "closing_spread",
-            "total_close": "closing_total",
-            "home_moneyline_close": "moneyline_home",
-            "away_moneyline_close": "moneyline_away",
-        },
-        inplace=True,
-    )
+    if betting.empty:
+        df = sched.copy()
+        df["closing_spread"] = np.nan
+        df["closing_total"] = np.nan
+        df["moneyline_home"] = np.nan
+        df["moneyline_away"] = np.nan
+    else:
+        for c in bl_keep:
+            if c not in betting.columns:
+                betting[c] = np.nan
+        bl = betting[bl_keep].drop_duplicates("game_id")
+        df = sched.merge(bl, on="game_id", how="left")
+        df.rename(
+            columns={
+                "spread_close": "closing_spread",
+                "total_close": "closing_total",
+                "home_moneyline_close": "moneyline_home",
+                "away_moneyline_close": "moneyline_away",
+            },
+            inplace=True,
+        )
 
     feats = build_features(df, weekly, FeatureBuildConfig())
     # Keep rows with targets (completed games)
@@ -192,7 +228,7 @@ def main():
     }
 
     # Save artifacts
-    run_dir = artifacts_root / f"run_{test_season}"
+    run_dir = artifacts_root / f"run_{test_season}_{int(time.time())}"
     run_dir.mkdir(parents=True, exist_ok=True)
     save_artifacts(arts, run_dir)
     import torch

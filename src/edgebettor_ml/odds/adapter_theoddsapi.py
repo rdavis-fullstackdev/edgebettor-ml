@@ -38,7 +38,8 @@ class TheOddsApiAdapter(OddsAdapter):
         for game in data:
             game_id = str(game.get("id"))
             home_team = game.get("home_team")
-            away_team = next((t for t in game.get("commence_time", ""),), None)  # placeholder
+            teams = game.get("teams") or []
+            away_team = next((t for t in teams if t != home_team), None)
             bookmakers = game.get("bookmakers", [])
             if not bookmakers:
                 continue
@@ -47,7 +48,7 @@ class TheOddsApiAdapter(OddsAdapter):
             row = {
                 "game_id": game_id,
                 "home_team": home_team,
-                "away_team": None,
+                "away_team": away_team,
                 "moneyline_home": None,
                 "moneyline_away": None,
                 "spread_home": None,
