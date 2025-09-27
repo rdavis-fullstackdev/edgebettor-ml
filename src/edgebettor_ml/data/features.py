@@ -5,6 +5,17 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from .advanced import compute_team_week_advanced
+TEAM_NORMALIZE = {
+    "LA": "LAR",  # normalize Rams
+}
+
+def _normalize_team(code: str) -> str:
+    try:
+        return TEAM_NORMALIZE.get(code, code)
+    except Exception:
+        return code
+
 
 
 ROLLING_WINDOWS = (3, 5)
@@ -14,6 +25,8 @@ ROLLING_WINDOWS = (3, 5)
 class FeatureBuildConfig:
     rolling_windows: Tuple[int, int] = ROLLING_WINDOWS
     include_market_inputs: bool = True
+    ewm_enabled: bool = True
+    ewm_halflife_games: int = 4
 
 
 def _compute_team_rolling(stats: pd.DataFrame, windows: Sequence[int]) -> pd.DataFrame:
@@ -25,7 +38,11 @@ def _compute_team_rolling(stats: pd.DataFrame, windows: Sequence[int]) -> pd.Dat
     candidate_cols = [c for c in stats.columns if c not in required]
     for c in candidate_cols:
         stats[c] = pd.to_numeric(stats[c], errors="coerce")
-    numeric_cols = [c for c in candidate_cols if pd.api.types.is_numeric_dtype(stats[c])]
+    # keep only numeric columns with at least one non-NaN value
+    numeric_cols = [
+        c for c in candidate_cols
+        if pd.api.types.is_numeric_dtype(stats[c]) and stats[c].notna().any()
+    ]
     grouped = stats.groupby("team", as_index=False, group_keys=False)
     frames = [stats[["team", "season", "week"]].copy()]
     for w in windows:
@@ -76,9 +93,33 @@ def _first_existing(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     return None
 
 
-def _augment_weekly_with_derived(schedule: pd.DataFrame, weekly: pd.DataFrame) -> pd.DataFrame:
+def _augment_weekly_with_derived(schedule: pd.DataFrame, weekly: pd.DataFrame, pbp: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     # Start with opponent margin
     w = _add_opponent_margin(schedule, weekly).copy()
+
+    # Add advanced z-scores if pbp provided
+    if pbp is not None and not pbp.empty:
+        adv = compute_team_week_advanced(pbp)
+        w = w.merge(
+            adv[[
+                "season","week","team",
+                "epa_off_z","epa_def_z","success_off_z","success_def_z",
+                "pass_rate_off_z","neutral_pace_z"
+            ]],
+            on=["season","week","team"], how="left"
+        )
+        # Add exponentially weighted moving averages for these z-score metrics
+        z_cols = [
+            "epa_off_z","epa_def_z","success_off_z","success_def_z",
+            "pass_rate_off_z","neutral_pace_z"
+        ]
+        # Ensure ordering before transform
+        w = w.sort_values(["team", "season", "week"]).copy()
+        for col in z_cols:
+            if col in w.columns:
+                w[f"{col}_ewm18"] = w.groupby("team")[col].transform(
+                    lambda s: pd.to_numeric(s, errors="coerce").ewm(halflife=4, min_periods=1).mean()
+                )
 
     # Third-down offense: converted / attempts
     td_conv_col = _first_existing(w, [
@@ -144,6 +185,14 @@ def _merge_game_rows(
     for col in req:
         if col not in schedule.columns:
             raise ValueError(f"Missing column in schedule: {col}")
+    # Normalize team codes for merge compatibility
+    schedule = schedule.copy()
+    schedule["home_team"] = schedule["home_team"].astype(str).map(_normalize_team)
+    schedule["away_team"] = schedule["away_team"].astype(str).map(_normalize_team)
+    team_roll = team_roll.copy()
+    if "team" in team_roll.columns:
+        team_roll["team"] = team_roll["team"].astype(str).map(_normalize_team)
+
     # Merge home and away rolling stats
     home = schedule.merge(
         team_roll.add_prefix("home_"),
@@ -174,6 +223,7 @@ def build_features(
     schedule: pd.DataFrame,
     team_weekly_stats: pd.DataFrame,
     config: Optional[FeatureBuildConfig] = None,
+    shift_weeks_for_merge: int = 0,
 ) -> pd.DataFrame:
     """Return per-game feature rows including targets when available.
 
@@ -183,8 +233,22 @@ def build_features(
       - y_home_win, y_home_cover_vs_closing, y_over_total_vs_closing
     """
     cfg = config or FeatureBuildConfig()
-    weekly_aug = _augment_weekly_with_derived(schedule, team_weekly_stats)
+    # Try to attach pbp if available in cache
+    pbp = None
+    try:
+        import os
+        from pathlib import Path
+        p = Path('.data/raw/pbp.csv')
+        if p.exists():
+            pbp = pd.read_csv(p)
+    except Exception:
+        pbp = None
+    weekly_aug = _augment_weekly_with_derived(schedule, team_weekly_stats, pbp)
     team_roll = _compute_team_rolling(weekly_aug, cfg.rolling_windows)
+    if shift_weeks_for_merge:
+        team_roll = team_roll.copy()
+        if "week" in team_roll.columns:
+            team_roll["week"] = pd.to_numeric(team_roll["week"], errors="coerce") + int(shift_weeks_for_merge)
     games = _merge_game_rows(schedule, team_roll)
 
     # Market inputs passthrough

@@ -40,7 +40,14 @@ def build_upcoming_features(season: int, week: int) -> pd.DataFrame:
     stats_mask = (weekly["season"] < season) | ((weekly["season"] == season) & (weekly["week"] < week))
     weekly_hist = weekly.loc[stats_mask].copy()
 
-    feats = build_features(week_sched, weekly_hist, FeatureBuildConfig(include_market_inputs=True))
+    # Shift weekly stats forward one week for inference so each team's rolling
+    # features reflect information up to week-1 when predicting week
+    feats = build_features(
+        week_sched,
+        weekly_hist,
+        FeatureBuildConfig(include_market_inputs=True),
+        shift_weeks_for_merge=1,
+    )
     return feats
 
 

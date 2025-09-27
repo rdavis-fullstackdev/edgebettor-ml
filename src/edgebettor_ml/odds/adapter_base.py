@@ -29,6 +29,8 @@ def ensure_standard_columns(df: pd.DataFrame) -> pd.DataFrame:
     missing = [c for c in STANDARD_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required odds columns: {missing}")
-    return df[STANDARD_COLUMNS].copy()
+    # Keep required first, preserve any extra informative columns (e.g., commence_time, bookmaker)
+    ordered = STANDARD_COLUMNS + [c for c in df.columns if c not in STANDARD_COLUMNS]
+    return df[ordered].copy()
 
 

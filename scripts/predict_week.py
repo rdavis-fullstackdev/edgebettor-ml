@@ -25,6 +25,7 @@ def main():
     p.add_argument("--week", type=int, required=True)
     p.add_argument("--odds-source", choices=["csv", "theoddsapi"], required=True)
     p.add_argument("--odds-csv-path", default=None)
+    p.add_argument("--book", default=None, help="Specific bookmaker title (e.g., Caesars)")
     args = p.parse_args()
 
     if args.odds_source == "csv":
@@ -32,10 +33,23 @@ def main():
             raise SystemExit("--odds-csv-path is required when --odds-source=csv")
         adapter = CsvOddsAdapter(args.odds_csv_path)
     else:
-        adapter = TheOddsApiAdapter()
+        from edgebettor_ml.odds.adapter_theoddsapi import TheOddsApiAdapter
+        book = args.book or "Caesars"
+        adapter = TheOddsApiAdapter(bookmaker_title=book)
 
     odds_df = adapter.fetch_odds(args.season, args.week)
     feats = build_upcoming_features(args.season, args.week)
+    # Merge odds into features BEFORE prediction to condition spread/total
+    odds_slim = odds_df[[
+        "game_id","home_team","away_team","spread_home","total_points"
+    ]].copy()
+    feats_for_pred = feats.merge(odds_slim, on=["game_id","home_team","away_team"], how="left")
+    # Set model feature names consistently used in training
+    if "spread_home" in feats_for_pred.columns:
+        feats_for_pred["closing_spread"] = feats_for_pred["spread_home"]
+    if "total_points" in feats_for_pred.columns:
+        feats_for_pred["closing_total"] = feats_for_pred["total_points"]
+
     # Load latest artifacts directory (simple heuristic: most recent dir)
     art_root = Path("artifacts")
     if not art_root.exists():
@@ -49,15 +63,31 @@ def main():
         if not candidates:
             raise SystemExit("No valid artifact directories with model.pt present.")
         artifacts_dir = max(candidates, key=lambda p: (p / "model.pt").stat().st_mtime)
-    probs = predict_proba(feats, artifacts_dir)
+    probs = predict_proba(feats_for_pred, artifacts_dir)
 
     preds = []
     ev_rows = []
-    merged = feats.merge(odds_df, on=["game_id", "home_team", "away_team"], how="left", suffixes=("_feat", "_odds"))
-    for idx, r in merged.iterrows():
-        p_home_win = float(probs["p_home_win"][idx])
-        p_home_cover = float(probs["p_home_cover"][idx])
-        p_over = float(probs["p_over"][idx])
+    # Map probabilities by game_id to avoid row order issues
+    # Use DataFrame indexes to ensure 1:1 mapping by merge order
+    prob_df = feats_for_pred[["game_id"]].copy()
+    prob_df["p_home_win"] = probs["p_home_win"]
+    prob_df["p_home_cover"] = probs["p_home_cover"]
+    prob_df["p_over"] = probs["p_over"]
+
+    merged = feats.merge(prob_df, on=["game_id"], how="left").merge(
+        odds_df, on=["game_id", "home_team", "away_team"], how="left", suffixes=("_feat", "_odds")
+    )
+    for _, r in merged.iterrows():
+        p_home_win = float(r.p_home_win) if pd.notna(r.p_home_win) else 0.5
+        p_home_cover = float(r.p_home_cover) if pd.notna(r.p_home_cover) else 0.5
+        p_over = float(r.p_over) if pd.notna(r.p_over) else 0.5
+        # Odds fields
+        ml_home = r.get("moneyline_home_odds", r.get("moneyline_home"))
+        ml_away = r.get("moneyline_away_odds", r.get("moneyline_away"))
+        sp_home = r.get("spread_price_home_odds", r.get("spread_price_home"))
+        sp_away = r.get("spread_price_away_odds", r.get("spread_price_away"))
+        spread_home = r.get("spread_home_odds", r.get("spread_home"))
+        total_points = r.get("total_points_odds", r.get("total_points"))
         preds.append(
             PredictionRow(
                 game_id=str(r.game_id),
@@ -69,6 +99,14 @@ def main():
                 p_away_cover=1 - p_home_cover,
                 p_over=p_over,
                 p_under=1 - p_over,
+                home_ml_pct=p_home_win,
+                home_ml=int(ml_home) if pd.notna(ml_home) else None,
+                home_spread_pct=p_home_cover,
+                home_spread=float(spread_home) if pd.notna(spread_home) else None,
+                away_ml_pct=1 - p_home_win,
+                away_ml=int(ml_away) if pd.notna(ml_away) else None,
+                away_spread_pct=1 - p_home_cover,
+                away_spread=float(-spread_home) if pd.notna(spread_home) else None,
             )
         )
 
@@ -111,6 +149,26 @@ def main():
     write_ev_csv(Path("outputs") / f"ev_{args.season}_wk{args.week}.csv", ev_rows)
 
     print(f"Wrote {out_csv} and {out_json}")
+
+    # Debug: write a compact CSV to inspect mapping
+    try:
+        dbg_rows = []
+        for r in preds:
+            dbg_rows.append({
+                "game_id": r.game_id,
+                "home_team": r.home_team,
+                "away_team": r.away_team,
+                "home_spread": r.home_spread,
+                "away_spread": r.away_spread,
+                "p_home_win": r.p_home_win,
+                "p_home_cover": r.p_home_cover,
+                "p_away_cover": r.p_away_cover,
+                "home_ml": r.home_ml,
+                "away_ml": r.away_ml,
+            })
+        pd.DataFrame(dbg_rows).to_csv(Path("outputs") / f"preds_debug_{args.season}_wk{args.week}.csv", index=False)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

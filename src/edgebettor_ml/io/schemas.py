@@ -15,6 +15,15 @@ class PredictionRow(BaseModel):
     p_away_cover: float
     p_over: float
     p_under: float
+    # extras
+    home_ml_pct: float | None = None
+    home_ml: int | None = None
+    home_spread_pct: float | None = None
+    home_spread: float | None = None
+    away_ml_pct: float | None = None
+    away_ml: int | None = None
+    away_spread_pct: float | None = None
+    away_spread: float | None = None
 
 
 class EvRow(BaseModel):

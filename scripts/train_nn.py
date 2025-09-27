@@ -194,7 +194,14 @@ def main():
         max_epochs=cfg["model"].get("max_epochs", 100),
         early_stopping_patience=cfg["model"].get("early_stopping_patience", 15),
     )
-    model, metrics = train_model(X_tr_std, y_train, X_va_std, y_val, tc)
+    # Optional class weights per head
+    cw_cfg = cfg.get("class_weights", {})
+    head_weights = {
+        "p_home_win": float(cw_cfg.get("home_win", 1.0)),
+        "p_home_cover": float(cw_cfg.get("home_cover", 1.0)),
+        "p_over": float(cw_cfg.get("over_total", 1.0)),
+    }
+    model, metrics = train_model(X_tr_std, y_train, X_va_std, y_val, tc, class_weights=head_weights)
 
     # Calibrate on validation
     import torch

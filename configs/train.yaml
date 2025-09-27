@@ -9,7 +9,10 @@ model:
   max_epochs: 100
   early_stopping_patience: 15
 features:
-  windows: [3, 5]
+  windows: [3, 5, 18]
+  ewm:
+    enabled: true
+    halflife_games: 4
   include:
     - epa_off
     - epa_def

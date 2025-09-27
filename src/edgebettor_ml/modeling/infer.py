@@ -7,6 +7,7 @@ from typing import Dict
 import numpy as np
 import torch
 
+import os
 from .datasets import PreprocessArtifacts, build_feature_matrix, load_artifacts, transform_with
 from .model_nn import MultiHeadNet
 from .calibration import load_calibrators
@@ -41,24 +42,14 @@ def predict_proba(features_df, artifacts_dir: str | Path) -> Dict[str, np.ndarra
     X = build_feature_matrix(df, arts.feature_names)
     X_std = transform_with(arts, X)
     with torch.no_grad():
-        # Align input columns to model's expected dim
-        try:
-            expected_in = int(model.trunk[0].weight.shape[1])
-        except Exception:
-            expected_in = X_std.shape[1]
-        X_in = X_std
-        if X_std.shape[1] > expected_in:
-            X_in = X_std[:, :expected_in]
-        elif X_std.shape[1] < expected_in:
-            pad = np.zeros((X_std.shape[0], expected_in - X_std.shape[1]), dtype=X_std.dtype)
-            X_in = np.concatenate([X_std, pad], axis=1)
-        out = model(torch.tensor(X_in, dtype=torch.float32))
+        out = model(torch.tensor(X_std, dtype=torch.float32))
     p = {k: v.numpy() for k, v in out.items()}
-    calib_path = Path(artifacts_dir) / "calibrators.pkl"
-    if calib_path.exists():
-        calibrators = load_calibrators(artifacts_dir)
-        for k, iso in calibrators.items():
-            p[k] = iso.predict(p[k])
+    if os.environ.get("APPLY_CALIBRATION", "0") == "1":
+        calib_path = Path(artifacts_dir) / "calibrators.pkl"
+        if calib_path.exists():
+            calibrators = load_calibrators(artifacts_dir)
+            for k, iso in calibrators.items():
+                p[k] = iso.predict(p[k])
     return p
 
 
